@@ -1,0 +1,30 @@
+{
+  "repo": "demo/repo",
+  "worktreeRoot": "demo/worktrees",
+  "resultsDir": "results-demo",
+
+  "build": {
+    "command": "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force -Path dist | Out-Null; Copy-Item work.js dist/work.js -Force\"",
+    "artifact": "dist/work.js"
+  },
+
+  "run": { "warmups": 1, "reps": 3, "cooldownSec": 0, "keepTrace": "none" },
+
+  "telemetry": {
+    "collector": "time",
+    "primaryMetric": "wallSecNorm"
+  },
+
+  "workloads": {
+    "work": { "command": "node {artifact}" }
+  },
+
+  "variants": [
+    { "label": "base",   "branch": "demo/base",   "workloads": ["work"] },
+    { "label": "faster", "branch": "demo/faster", "workloads": ["work"] }
+  ],
+
+  "comparisons": [
+    { "name": "speedup", "workload": "work", "baseline": "base", "candidate": "faster" }
+  ]
+}

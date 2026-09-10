@@ -1,0 +1,46 @@
+{
+  "repo": "C:/work/perf-harness-demo-repo",
+  "worktreeRoot": "C:/work/perf-harness-test-worktrees",
+  "resultsDir": "results-test",
+
+  "build": {
+    "command": "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force -Path dist | Out-Null; Copy-Item work.js dist/work.js -Force\"",
+    "artifact": "dist/work.js"
+  },
+
+  "workspace": {
+    "path": "C:/work/perf-harness-testws",
+    "reset": "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '{workspace}' | Out-Null; Set-Content -LiteralPath '{workspace}/seed.txt' -Value '{seed}'\""
+  },
+
+  "run": { "warmups": 1, "reps": 3, "cooldownSec": 0, "keepTrace": "first" },
+
+  "telemetry": {
+    "collector": "command",
+    "collect": {
+      "command": "pwsh -NoProfile -File C:/work/perf-harness/examples/testkit/collect.ps1 -Trace \"{trace}\" -Command \"{command}\""
+    },
+    "extract": {
+      "command": "pwsh -NoProfile -File C:/work/perf-harness/examples/testkit/extract.ps1 -Trace \"{trace}\" -Out \"{out}\"",
+      "process": "na"
+    },
+    "primaryMetric": "workSum"
+  },
+
+  "workloads": {
+    "work": {
+      "seed": "S1",
+      "command": "node {artifact}",
+      "oracle": "pwsh -NoProfile -Command \"if ((Get-Content '{workspace}/seed.txt' -Raw).Trim() -eq 'S1') { exit 0 } else { exit 1 }\""
+    }
+  },
+
+  "variants": [
+    { "label": "base",   "branch": "demo/base",   "workloads": ["work"] },
+    { "label": "faster", "branch": "demo/faster", "workloads": ["work"] }
+  ],
+
+  "comparisons": [
+    { "name": "speedup", "workload": "work", "baseline": "base", "candidate": "faster" }
+  ]
+}
