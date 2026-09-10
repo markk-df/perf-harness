@@ -1,0 +1,14 @@
+results/
+results-*/
+traces/
+*.etl
+*.etl.zip
+progress.json
+
+# .NET build output (tools/EtlPerfReport)
+bin/
+obj/
+
+# transient demo fixtures created by examples/demo/Setup-Demo.ps1
+examples/demo/repo/
+examples/demo/worktrees/

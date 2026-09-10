@@ -1,0 +1,6 @@
+<Project>
+  <!-- Stops MSBuild from importing the repo-root Directory.Build.props (which injects
+       analyzers/packages that assume Central Package Management). This ETL analysis tool
+       is intentionally self-contained so it can be built and run in isolation, including
+       against ETLs captured on another machine (for example a CI or cloud build agent). -->
+</Project>
