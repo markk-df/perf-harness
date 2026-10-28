@@ -1,0 +1,52 @@
+{
+  "repo": "C:/data/perf/cstool",
+  "buildMode": "switch",
+  "resultsDir": "C:/data/perf/results-init",
+
+  "setup": {
+    "commands": [
+      "taskkill /f /t /im CSTool.exe",
+      "taskkill /f /t /im dotnet.exe",
+      "taskkill /f /t /im msbuild.exe",
+      "taskkill /f /t /im vbcscompiler.exe"
+    ]
+  },
+
+  "build": {
+    "command": "dotnet build CSTool.sln -c Release -v quiet --nologo",
+    "artifact": "CSTool/bin/Release/net10.0-windows/CSTool.exe"
+  },
+
+  "workspace": {
+    "path": "C:/data/perf/oracle",
+    "reset": "git -C {workspace} reset -q --hard {seed} && git -C {workspace} clean -qfdx"
+  },
+
+  "run": { "warmups": 1, "reps": 4, "budgetHours": 3, "cooldownSec": 45, "keepTrace": "none", "minFreeGB": 5 },
+
+  "telemetry": {
+    "collector": "time",
+    "primaryMetric": "wallSecNorm"
+  },
+
+  "workloads": {
+    "init": {
+      "seed": "0def4518d64f87c157314a3bd6d2ef4809786628",
+      "command": "{artifact} map-all-types -d {workspace} -l C:/data/repos/dayforce/Build/projects.yml -v --no-autogen",
+      "oracle": "git -C {workspace} add -A && git -C {workspace} diff --cached --quiet 0def4518d64f87c157314a3bd6d2ef4809786628 && git -C {workspace} reset -q"
+    }
+  },
+
+  "variants": [
+    { "label": "base",    "branch": "master",           "workloads": ["init"] },
+    { "label": "dials",   "branch": "master",           "workloads": ["init"], "args": "--mdop2=8 --mdop3=4" },
+    { "label": "resolve", "branch": "perf/init-resolve", "workloads": ["init"] },
+    { "label": "combo",   "branch": "perf/init-resolve", "workloads": ["init"], "args": "--mdop2=8 --mdop3=4" }
+  ],
+
+  "comparisons": [
+    { "name": "dials-vs-base",   "workload": "init", "baseline": "base", "candidate": "dials",   "primaryMetric": "wallSecNorm" },
+    { "name": "resolve-vs-base", "workload": "init", "baseline": "base", "candidate": "resolve", "primaryMetric": "wallSecNorm" },
+    { "name": "combo-vs-base",   "workload": "init", "baseline": "base", "candidate": "combo",   "primaryMetric": "wallSecNorm" }
+  ]
+}
