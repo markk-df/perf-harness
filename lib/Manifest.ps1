@@ -15,6 +15,9 @@ function Read-Manifest([string]$Path, [bool]$RequireRepo = $true, [string]$BaseD
                 $raw.$field = Resolve-ManifestPath $raw.$field $BaseDir
             }
         }
+        if ($raw.PSObject.Properties.Name -contains 'outputs') {
+            foreach ($o in $raw.outputs) { $o.path = Resolve-ManifestPath $o.path $BaseDir }
+        }
     }
     Assert-Manifest $raw $RequireRepo
     $raw
@@ -87,6 +90,16 @@ function Assert-Manifest($M, [bool]$RequireRepo = $true) {
         $cand = $M.variants | Where-Object { $_.label -eq $c.candidate }
         if ($base -and $cand -and ($base.branch -eq $cand.branch) -and ((Get-VariantArgs $base) -eq (Get-VariantArgs $cand))) {
             $problems.Add("comparison '$($c.name)': baseline '$($c.baseline)' and candidate '$($c.candidate)' are identical (same branch and args) -- nothing to compare")
+        }
+    }
+
+    if ($M.PSObject.Properties.Name -contains 'outputs') {
+        $idx = 0
+        foreach ($o in $M.outputs) {
+            if (-not $o.path)    { $problems.Add("outputs[$idx] is missing path") }
+            elseif ($RequireRepo -and -not (Test-Path (Join-Path $o.path '.git'))) { $problems.Add("outputs[$idx] path is not a git repo: $($o.path)") }
+            if (-not $o.goldRef) { $problems.Add("outputs[$idx] is missing goldRef (the committed gold commit each rep resets to)") }
+            $idx++
         }
     }
 

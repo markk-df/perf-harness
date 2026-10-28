@@ -36,7 +36,11 @@ function Invoke-MeasuredRep($Manifest, $Variant, [string]$WorkloadName, [string]
     $stopwatch.Stop()
     $freqPct = Stop-FrequencySampler $sampler $freqFile
 
-    $wallSec  = [math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+    $wallSec  = if (($collected -is [hashtable]) -and $collected.ContainsKey('WallSec') -and $collected.WallSec) {
+        [math]::Round([double]$collected.WallSec, 1)
+    } else {
+        [math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+    }
     $wallNorm = if ($freqPct -gt 0) { [math]::Round($wallSec * $freqPct / 100, 1) } else { $wallSec }
 
     $metrics = Get-TraceMetrics $Manifest $collected.TracePath
@@ -71,13 +75,16 @@ function Remove-TraceSet([string]$TracePath) {
 }
 
 function Reset-Workspace($Manifest, $Workload) {
-    if ($Manifest.PSObject.Properties.Name -notcontains 'workspace') { return }
-    $vars = @{ workspace = $Manifest.workspace.path; seed = $Workload.seed }
-    $command = Expand-Template $Manifest.workspace.reset $vars
-    Invoke-Shell $command $null | Out-Null
+    if ($Manifest.PSObject.Properties.Name -contains 'workspace') {
+        $vars = @{ workspace = $Manifest.workspace.path; seed = $Workload.seed }
+        $command = Expand-Template $Manifest.workspace.reset $vars
+        Invoke-Shell $command $null | Out-Null
+    }
+    Reset-Outputs $Manifest
 }
 
 function Save-OracleIncident($Manifest, [string]$WorkloadName, [string]$Cell, [string]$ResultsDir) {
+    if (Test-HasOutputs $Manifest) { Save-OutputsIncident $Manifest $Cell $ResultsDir; return }
     # A failed oracle means the rep's output diverged from the reference commit. The diverged
     # workspace is about to be discarded by the next rep's Reset-Workspace, so unless it is captured
     # now the evidence is gone and the divergence can never be investigated. When the workspace is a
@@ -117,7 +124,13 @@ function Invoke-Collector($Manifest, $Workload, [string]$CommandLine, [string[]]
     switch ($Manifest.telemetry.collector) {
         'perfview' { Invoke-PerfViewCollector $Manifest.telemetry $Manifest.run $Workload $exe $cmdArgs $TracePath $LogPath }
         'command'  { Invoke-CommandCollector $Manifest.telemetry $CommandLine $TracePath $LogPath }
-        'time'     { Invoke-TimeCollector $exe $cmdArgs $LogPath }
+        'time'     {
+            if ((Test-HasOutputs $Manifest) -and (Get-DivergePollSec $Manifest) -gt 0) {
+                Invoke-TimeCollectorWatched $Manifest $exe $cmdArgs $LogPath
+            } else {
+                Invoke-TimeCollector $exe $cmdArgs $LogPath
+            }
+        }
         default    { throw "unknown collector: $($Manifest.telemetry.collector)" }
     }
 }
@@ -211,6 +224,7 @@ function Invoke-TimeCollector([string]$Exe, [string[]]$CommandArgs, [string]$Log
 }
 
 function Test-Oracle($Manifest, $Workload) {
+    if (Test-HasOutputs $Manifest) { return Test-OutputsOracle $Manifest }
     if (-not ($Workload.PSObject.Properties.Name -contains 'oracle') -or -not $Workload.oracle) { return 'SKIP' }
     $vars = @{ workspace = $Manifest.workspace.path }
     $command = Expand-Template $Workload.oracle $vars

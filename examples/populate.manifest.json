@@ -1,0 +1,42 @@
+{
+  "repo": "C:/data/perf/cstool",
+  "buildMode": "switch",
+  "resultsDir": "results-populate",
+
+  "build": {
+    "command": "dotnet build CSTool.sln -c Release -v quiet --nologo",
+    "artifact": "CSTool/bin/Release/net10.0-windows/CSTool.exe"
+  },
+
+  "outputs": [
+    { "path": "C:/data/repos/aida-dayforce-mining",      "goldRef": "b8b8588" },
+    { "path": "C:/data/repos/aida-dayforce-mining-json", "goldRef": "97172dcd" },
+    { "path": "C:/data/repos/aida-dayforce-mining-md",   "goldRef": "a3694f1f" }
+  ],
+
+  "run": {
+    "warmups": 1,
+    "reps": 3,
+    "cooldownSec": 0,
+    "maxDivergentFiles": 1,
+    "divergePollSec": 10,
+    "incidentMaxFiles": 20
+  },
+
+  "telemetry": { "collector": "time", "primaryMetric": "wallSecNorm" },
+
+  "workloads": {
+    "populate": {
+      "command": "{artifact} populate-data-source --no-elapsed -d C:/data/repos/cstool_workspace -t C:/data/repos/aida-dayforce-mining -r CI_76.0.0.30105 --writeFilesQueueCapacity 100000"
+    }
+  },
+
+  "variants": [
+    { "label": "w10", "branch": "master", "args": "--mdopWriteFiles 10", "workloads": ["populate"] },
+    { "label": "w20", "branch": "master", "args": "--mdopWriteFiles 20", "workloads": ["populate"] }
+  ],
+
+  "comparisons": [
+    { "name": "write-dop", "workload": "populate", "baseline": "w10", "candidate": "w20", "primaryMetric": "wallSecNorm" }
+  ]
+}

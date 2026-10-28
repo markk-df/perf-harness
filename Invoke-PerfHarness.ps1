@@ -32,7 +32,7 @@ param(
 )
 
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-foreach ($module in 'Common','Manifest','Repo','Environment','Run','Results') {
+foreach ($module in 'Common','Manifest','Repo','Environment','Outputs','Run','Results') {
     . (Join-Path $here "lib\$module.ps1")
 }
 

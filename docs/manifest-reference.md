@@ -173,6 +173,43 @@ A single directory that holds the input/output state your workload operates on. 
 (including warm-ups) the harness runs `reset` to restore it to a known point. `reset` may use shell
 operators. Omit this whole section if your workload needs no shared state.
 
+## `outputs` (optional)
+
+```json
+"outputs": [
+  { "path": "C:/data/repos/aida-dayforce-mining",      "goldRef": "b8b8588" },
+  { "path": "C:/data/repos/aida-dayforce-mining-json", "goldRef": "97172dcd" },
+  { "path": "C:/data/repos/aida-dayforce-mining-md",   "goldRef": "a3694f1f" }
+]
+```
+
+For workloads that read their input read-only and **write their result into N committed git repos**
+(the "sinks") rather than mutating one `workspace`. For these the oracle is **idempotence**: a sink
+is correct when the workload leaves its working tree clean against its own HEAD (which *is* the gold
+commit `goldRef`), so re-running the workload produces no change. This replaces the single-workspace
+"whole tree equals a golden SHA" oracle and is checked cheaply with `git status` only -- the harness
+never stages (`git add -A`), never diffs/patches the whole tree, and never snapshots or branches a
+sink (a bug can dirty thousands of files).
+
+- `path` -- the sink git repo (resolved against the manifest dir if relative).
+- `goldRef` -- the committed gold each rep resets to (per-sink; the sinks may sit at different SHAs).
+
+When `outputs` is present:
+- **Reset** (before every rep and warm-up) hard-resets each sink to its `goldRef` and `clean -qfdx`s
+  it -- this also discards a sink left half-written by a mid-run kill. `workspace` reset, if also
+  present, still runs; a read-only non-git input needs no `workspace` section at all.
+- **Oracle** is PASS only if every sink stays within its abort threshold (`run.maxDivergentFiles`).
+- **Two abort tiers.** An after-run check gates every rep; additionally a during-run watcher (only for
+  the `time` collector) polls the sinks every `run.divergePollSec` seconds and **kills the workload
+  mid-run** the moment any sink crosses its threshold, so a diverging rep never writes thousands of
+  files. The measured wall for a watched rep is the child process's own start-to-exit time, so the
+  poll sleeps never inflate it. A diverged or killed rep has a non-zero `exit`/`oracle=FAIL` and is
+  dropped from the median.
+- **Bounded incident capture** (see `run.keepOracleIncidents`) records, per breaching sink, the TRUE
+  total divergent-file count plus only the first `run.incidentMaxFiles` paths; each captured path is
+  captured **in full** (its complete diff if tracked, its complete content if untracked -- the bound
+  is the file count, not file size), under `results/incidents/<cell>/<repo>/`.
+
 ## `run`
 
 ```json
@@ -186,7 +223,10 @@ operators. Omit this whole section if your workload needs no shared state.
 | `budgetHours` | no cap | Wall-clock ceiling for the whole run (setup, build, warm-up, and measurement). The round-robin loop stops launching new cells once the deadline passes, landing the run near a target duration with every comparison measured a comparable number of times. |
 | `cooldownSec` | 0 | Seconds to wait between measured runs so the machine settles. Precedes every run but the first, so no idle wait trails the last run. |
 | `keepTrace` | rep 1 only | `none` deletes every trace; any other value (`first`, or the default) keeps only rep 1's trace per cell. The harness keeps at most one trace per cell by design (see "Disk safety"), so there is currently no "keep every repetition" setting. |
-| `keepOracleIncidents` | on (git workspaces) | When a rep's oracle check FAILs, the diverged workspace is preserved before the next rep discards it. For a git `workspace`, the harness snapshots the whole-tree delta against the oracle's reference commit (the 40-hex SHA named in the workload `oracle` command, else the workload `seed`) into `results/incidents/<cell>/`: `stat.txt`, `numstat.txt`, a readable `incident.diff`, and a reconstructable `incident.patch` (apply onto the reference with `git apply`). Set to `false` to opt out. Non-git workspaces are skipped. |
+| `keepOracleIncidents` | on (git workspaces) | When a rep's oracle check FAILs, the diverged workspace is preserved before the next rep discards it. For a git `workspace`, the harness snapshots the whole-tree delta against the oracle's reference commit (the 40-hex SHA named in the workload `oracle` command, else the workload `seed`) into `results/incidents/<cell>/`: `stat.txt`, `numstat.txt`, a readable `incident.diff`, and a reconstructable `incident.patch` (apply onto the reference with `git apply`). With `outputs`, it instead writes a bounded per-sink capture (true total count + first `incidentMaxFiles` paths, each captured in full) under `results/incidents/<cell>/<repo>/`. Set to `false` to opt out. Non-git workspaces are skipped. |
+| `maxDivergentFiles` | 1 | With `outputs`: the per-repo abort threshold -- the count of divergent files at which a sink is declared FAIL and the during-run watcher kills the workload. Overridable per output (`outputs[].maxDivergentFiles`). Default 1 means any single divergent file fails the sink. |
+| `divergePollSec` | 10 | With `outputs` + the `time` collector: the during-run watcher's poll cadence in seconds. Set to 0 to disable the mid-run kill and rely only on the after-run check. |
+| `incidentMaxFiles` | 20 | With `outputs`: how many diverging paths to capture per sink in an incident (the true total count is always recorded; each captured path is captured in full). |
 | `minFreeGB` | no guard | Checked before each run *and* continuously during collection: if free disk on the trace drive drops below this, the in-progress collection is aborted and its partial trace deleted. |
 | `maxTraceGB` | no cap | Hard per-trace ceiling. While a trace is being collected the harness watches the growing trace set; if it exceeds this, collection is aborted and the partial trace deleted. This bounds disk use no matter how long or chatty a workload is -- see "Disk safety" below. |
 
