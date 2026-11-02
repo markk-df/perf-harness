@@ -82,7 +82,7 @@ function Reset-Workspace($Manifest, $Workload) {
         $command = Expand-Template $Manifest.workspace.reset $vars
         Invoke-Shell $command $null | Out-Null
     }
-    Reset-Outputs $Manifest
+    Reset-Outputs $Manifest $Workload
 }
 
 function Save-OracleIncident($Manifest, [string]$WorkloadName, [string]$Cell, [string]$ResultsDir) {
@@ -127,7 +127,7 @@ function Invoke-Collector($Manifest, $Telemetry, $Workload, [string]$CommandLine
         'perfview' { Invoke-PerfViewCollector $Telemetry $Manifest.run $Workload $exe $cmdArgs $TracePath $LogPath }
         'command'  { Invoke-CommandCollector $Telemetry $CommandLine $TracePath $LogPath }
         'time'     {
-            if ((Test-HasOutputs $Manifest) -and (Get-DivergePollSec $Manifest) -gt 0) {
+            if ((Test-HasOutputs $Manifest) -and (Get-DivergePollSec $Manifest) -gt 0 -and (Get-SeedDepth $Workload) -eq 0) {
                 Invoke-TimeCollectorWatched $Manifest $exe $cmdArgs $LogPath
             } else {
                 Invoke-TimeCollector $exe $cmdArgs $LogPath
@@ -226,7 +226,7 @@ function Invoke-TimeCollector([string]$Exe, [string[]]$CommandArgs, [string]$Log
 }
 
 function Test-Oracle($Manifest, $Workload) {
-    if (Test-HasOutputs $Manifest) { return Test-OutputsOracle $Manifest }
+    if (Test-HasOutputs $Manifest) { return Test-OutputsOracle $Manifest $Workload }
     if (-not ($Workload.PSObject.Properties.Name -contains 'oracle') -or -not $Workload.oracle) { return 'SKIP' }
     $vars = @{ workspace = $Manifest.workspace.path }
     $command = Expand-Template $Workload.oracle $vars

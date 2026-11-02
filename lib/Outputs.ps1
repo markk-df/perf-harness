@@ -21,6 +21,17 @@ A manifest opts in with a top-level `outputs` array:
 
 maxDivergentFiles is the per-repo abort threshold (default 1 => any single divergent file fails the
 sink); it is overridable per output. divergePollSec (default 10) is the during-run watcher cadence.
+
+A workload may additionally carry `seedDepth` (default 0), which selects the oracle:
+  seedDepth 0  -- IDEMPOTENCE (above): the sink is reset to goldRef and must stay byte-clean against
+                  it; the workload is expected to write nothing. Cheap, status-based, watched.
+  seedDepth K  -- DRIFT: the sink is reset to goldRef~K (K commits of real prior output) and the
+                  workload must regenerate goldRef exactly. The after-run gate compares the WHOLE tree
+                  to goldRef -- content, additions, and deletions -- via a bounded `add -A;
+                  diff --cached goldRef`. Drift is the only mode that exercises the WRITE path
+                  (idempotence exercises only skips); the during-run watcher is disabled for drift
+                  because the tree legitimately diverges from HEAD until the workload finishes.
+K lives in the manifest as data; `git` resolves goldRef~K, so changing K never touches any script.
 #>
 
 function Test-HasOutputs($Manifest) {
@@ -29,6 +40,12 @@ function Test-HasOutputs($Manifest) {
 
 function Get-OutputName($Output) {
     Split-Path -Leaf ([string]$Output.path)
+}
+
+function Get-SeedDepth($Workload) {
+    # Depth of the drift seed: reset each sink to goldRef~seedDepth. 0 (default) => seed AT gold
+    # (idempotence oracle); K > 0 => seed K commits back and require the workload to reproduce gold.
+    if ($Workload -and ($Workload.PSObject.Properties.Name -contains 'seedDepth')) { [int]$Workload.seedDepth } else { 0 }
 }
 
 function Get-OutputBudget($Manifest, $Output) {
@@ -45,12 +62,15 @@ function Get-DivergePollSec($Manifest) {
     10
 }
 
-function Reset-Outputs($Manifest) {
-    # Restore every sink to its gold commit before a rep: hard-reset to goldRef then remove untracked
-    # and ignored files, which also cleans up the half-written sink left by a mid-run kill.
+function Reset-Outputs($Manifest, $Workload) {
+    # Restore every sink to its seed before a rep. For idempotence (seedDepth 0) the seed IS goldRef;
+    # for drift (seedDepth K) it is goldRef~K. Hard-reset to the seed then remove untracked and ignored
+    # files, which also cleans up the half-written sink left by a mid-run kill.
     if (-not (Test-HasOutputs $Manifest)) { return }
+    $depth = Get-SeedDepth $Workload
     foreach ($o in $Manifest.outputs) {
-        $cmd = "git -C `"$($o.path)`" reset -q --hard $($o.goldRef) && git -C `"$($o.path)`" clean -qfdx"
+        $ref = if ($depth -gt 0) { "$($o.goldRef)~$depth" } else { "$($o.goldRef)" }
+        $cmd = "git -C `"$($o.path)`" reset -q --hard $ref && git -C `"$($o.path)`" clean -qfdx"
         Invoke-Shell $cmd $null | Out-Null
     }
 }
@@ -73,18 +93,23 @@ function Get-OutputsBreach($Manifest) {
     $null
 }
 
-function Test-OutputsOracle($Manifest) {
-    # After-run gate: PASS only if every sink is within its budget. Records the breaching sinks so the
-    # incident capture knows which repos to snapshot without recomputing.
+function Test-OutputsOracle($Manifest, $Workload) {
+    # After-run gate: PASS only if every sink is within its budget. For drift (seedDepth K) each sink
+    # is first repointed to goldRef with `reset --mixed` -- this moves index+HEAD to gold WITHOUT
+    # touching the working tree (it loads gold's tree into the index; it does not scan or hash the
+    # working files), so the SAME cheap, bounded `git status` budget check below now measures
+    # divergence from GOLD instead of from the seed. For idempotence (seedDepth 0) HEAD already IS
+    # goldRef, so the mixed reset is skipped and the check is unchanged. Records the breaching sinks so
+    # the incident capture knows which repos to snapshot without recomputing.
+    $depth = Get-SeedDepth $Workload
     $script:OutputsLastBreaches = @()
     foreach ($o in $Manifest.outputs) {
+        if ($depth -gt 0) { Invoke-Shell "git -C `"$($o.path)`" reset -q --mixed $($o.goldRef)" $null | Out-Null }
         $budget = Get-OutputBudget $Manifest $o
         if (Test-OutputOverBudget $o.path $budget) { $script:OutputsLastBreaches += $o }
     }
     if ($script:OutputsLastBreaches.Count -gt 0) { 'FAIL' } else { 'PASS' }
-}
-
-function Get-IncidentMaxFiles($Manifest) {
+}function Get-IncidentMaxFiles($Manifest) {
     if ($Manifest.run.PSObject.Properties.Name -contains 'incidentMaxFiles') { [int]$Manifest.run.incidentMaxFiles } else { 20 }
 }
 
@@ -100,7 +125,9 @@ function Save-OutputsIncident($Manifest, [string]$Cell, [string]$ResultsDir) {
     # divergent-file count plus only the first K paths (K = run.incidentMaxFiles); each captured path
     # is captured in full -- its complete diff (tracked change) or complete file (untracked). The bound
     # is the file COUNT, not file size. No `git add -A`, no whole-tree patch, no capture branch, no
-    # snapshot -- the next rep's Reset-Outputs discards the dirty tree.
+    # snapshot -- the next rep's Reset-Outputs discards the dirty tree. Seed-agnostic: under drift the
+    # oracle has already repointed each sink's HEAD to goldRef, so `status`/`diff HEAD` here capture
+    # divergence from gold exactly as they capture divergence from the idempotent gold.
     if ($Manifest.run.PSObject.Properties.Name -contains 'keepOracleIncidents' -and -not $Manifest.run.keepOracleIncidents) { return }
     $breaches = if ($script:OutputsLastBreaches) { $script:OutputsLastBreaches } else { $Manifest.outputs }
     $maxFiles = Get-IncidentMaxFiles $Manifest

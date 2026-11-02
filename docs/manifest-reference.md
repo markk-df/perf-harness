@@ -194,11 +194,37 @@ sink (a bug can dirty thousands of files).
 - `path` -- the sink git repo (resolved against the manifest dir if relative).
 - `goldRef` -- the committed gold each rep resets to (per-sink; the sinks may sit at different SHAs).
 
+### Seed depth -- idempotence vs drift (`workloads[].seedDepth`)
+
+A workload that writes into `outputs` picks its oracle with an optional `seedDepth` (default `0`):
+
+- **`seedDepth: 0` -- idempotence** (the default, described above): each sink is reset to `goldRef`
+  and must stay byte-clean against it; the workload is expected to write nothing. This exercises only
+  the workload's **skip** path and is the cheap, watched, `git status`-based oracle.
+- **`seedDepth: K` (K > 0) -- drift**: each sink is reset to **`goldRef~K`** (K commits of real prior
+  output) and the workload must regenerate `goldRef` exactly. The after-run oracle uses the **same**
+  bounded `git status` check -- it just first repoints each sink to `goldRef` with
+  `git reset --mixed goldRef`, which moves index+HEAD to gold **without touching the working tree** (it
+  loads gold's tree into the index; it does not scan or hash the working files). The existing
+  `git status --porcelain -uall | first maxDivergentFiles` then measures divergence from **gold** --
+  content, additions, and deletions alike -- and stays bounded even if a bug dirties millions of files.
+  Drift is the only mode that exercises the workload's **write** path. The during-run watcher is
+  **disabled** for drift (the tree legitimately diverges from HEAD until the workload finishes), so
+  correctness rests on the after-run check.
+
+`K` is manifest data: `git` resolves `goldRef~K`, so changing K never touches any script. Declare two
+workloads (one `seedDepth: 0`, one `seedDepth: K`) to measure both the skip and the write path from a
+single run. Incident capture is seed-agnostic: the drift oracle has already repointed HEAD to `goldRef`,
+so the same bounded capture (true count + first `incidentMaxFiles` full diffs/files vs HEAD) records the
+divergence from gold.
+
 When `outputs` is present:
 - **Reset** (before every rep and warm-up) hard-resets each sink to its `goldRef` and `clean -qfdx`s
   it -- this also discards a sink left half-written by a mid-run kill. `workspace` reset, if also
   present, still runs; a read-only non-git input needs no `workspace` section at all.
-- **Oracle** is PASS only if every sink stays within its abort threshold (`run.maxDivergentFiles`).
+- **Oracle** (idempotence, `seedDepth: 0`) is PASS only if every sink stays within its abort threshold
+  (`run.maxDivergentFiles`). For `seedDepth: K`, the same threshold check runs after a
+  `git reset --mixed goldRef` repoints each sink to gold, so it measures divergence from `goldRef`.
 - **Two abort tiers.** An after-run check gates every rep; additionally a during-run watcher (only for
   the `time` collector) polls the sinks every `run.divergePollSec` seconds and **kills the workload
   mid-run** the moment any sink crosses its threshold, so a diverging rep never writes thousands of
@@ -225,7 +251,7 @@ When `outputs` is present:
 | `keepTrace` | rep 1 only | `none` deletes every trace; any other value (`first`, or the default) keeps only rep 1's trace per cell. The harness keeps at most one trace per cell by design (see "Disk safety"), so there is currently no "keep every repetition" setting. |
 | `keepOracleIncidents` | on (git workspaces) | When a rep's oracle check FAILs, the diverged workspace is preserved before the next rep discards it. For a git `workspace`, the harness snapshots the whole-tree delta against the oracle's reference commit (the 40-hex SHA named in the workload `oracle` command, else the workload `seed`) into `results/incidents/<cell>/`: `stat.txt`, `numstat.txt`, a readable `incident.diff`, and a reconstructable `incident.patch` (apply onto the reference with `git apply`). With `outputs`, it instead writes a bounded per-sink capture (true total count + first `incidentMaxFiles` paths, each captured in full) under `results/incidents/<cell>/<repo>/`. Set to `false` to opt out. Non-git workspaces are skipped. |
 | `maxDivergentFiles` | 1 | With `outputs`: the per-repo abort threshold -- the count of divergent files at which a sink is declared FAIL and the during-run watcher kills the workload. Overridable per output (`outputs[].maxDivergentFiles`). Default 1 means any single divergent file fails the sink. |
-| `divergePollSec` | 10 | With `outputs` + the `time` collector: the during-run watcher's poll cadence in seconds. Set to 0 to disable the mid-run kill and rely only on the after-run check. |
+| `divergePollSec` | 10 | With `outputs` + the `time` collector and `seedDepth: 0`: the during-run watcher's poll cadence in seconds. Set to 0 to disable the mid-run kill and rely only on the after-run check. The watcher is always off for `seedDepth: K` drift workloads. |
 | `incidentMaxFiles` | 20 | With `outputs`: how many diverging paths to capture per sink in an incident (the true total count is always recorded; each captured path is captured in full). |
 | `minFreeGB` | no guard | Checked before each run *and* continuously during collection: if free disk on the trace drive drops below this, the in-progress collection is aborted and its partial trace deleted. |
 | `maxTraceGB` | no cap | Hard per-trace ceiling. While a trace is being collected the harness watches the growing trace set; if it exceeds this, collection is aborted and the partial trace deleted. This bounds disk use no matter how long or chatty a workload is -- see "Disk safety" below. |
