@@ -261,7 +261,7 @@ documents intent and leaves room for future knobs.
 
 | Field | Required | Meaning |
 |---|---|---|
-| `collector` | yes | `perfview` (built-in ETW), `command` (your own wrapper), or `time` (just run and time it). |
+| `collector` | yes | `perfview` (built-in ETW), `command` (your own wrapper), or `time` (just run and time it). This is the run-level default; a variant can override it (see "Overriding telemetry per variant"). |
 | `traceDir` | no | Where trace files are written. Defaults to `traces` under the results dir. |
 | `perfview` | if perfview | `exe` path; optional `kernelEvents` and `clrEvents` scopes; optional `cpuCounters` string; `merge` (default true). See "Disk safety". |
 | `collect` | if command | `command` template that runs `{command}` and writes a trace to `{trace}`. See below. |
@@ -384,6 +384,7 @@ Each variant is one branch under test.
 | `branch` | yes | The git branch to build. Variants must be branches (not tags or raw commits). |
 | `workloads` | yes | The workload names this variant can run. |
 | `args` | no | Extra command-line arguments appended to every workload command this variant runs. Template placeholders are expanded in it too. |
+| `telemetry` | no | A partial `telemetry` object deep-merged onto the run-level `telemetry` for this variant only (see "Overriding telemetry per variant"). |
 
 Requiring branches is a deliberate simplification: branches give readable labels and a clean
 worktree per variant with no detached-HEAD handling, at no cost to you.
@@ -413,8 +414,44 @@ Two constraints the harness enforces up front:
 
 - Same-branch variants require `buildMode` `switch` or `clone`. `worktree` cannot check one branch
   out in two worktrees, so it is rejected with a clear message rather than failing mid-run.
-- A comparison whose two arms resolve to the **same branch and the same `args`** is rejected --
-  there would be nothing to compare.
+- A comparison whose two arms resolve to the **same branch, the same `args`, and the same
+  telemetry** is rejected -- there would be nothing to compare.
+
+### Overriding telemetry per variant
+
+`telemetry.collector` (and every other `telemetry` field) is a **run-level default**. A variant may
+carry its own partial `telemetry` object, which is **deep-merged** onto the run-level one for that
+variant only (nested objects merge, scalars and arrays replace -- the same semantics as the
+`stagingdebug` manifest overrides). A variant with no `telemetry` runs under the run-level config
+unchanged, so existing manifests are unaffected.
+
+This lets one run compare the same code under two collectors, or run some variants traced and others
+untraced. For example, measure a change both untraced (wall-clock only) and traced (allocations)
+in a single manifest:
+
+```json
+"telemetry": {
+  "collector": "time",
+  "primaryMetric": "wallSecNorm",
+  "perfview": { "exe": "C:/utils/perfview.exe" },
+  "extract": { "command": "dotnet .../etl-perf-report.dll {trace} --process {process} --json {out}", "process": "myapp" }
+},
+"variants": [
+  { "label": "base",       "branch": "master",  "workloads": ["populate"] },
+  { "label": "opt",        "branch": "perf/opt", "workloads": ["populate"] },
+  { "label": "base-traced","branch": "master",  "workloads": ["populate"], "telemetry": { "collector": "perfview" } },
+  { "label": "opt-traced", "branch": "perf/opt", "workloads": ["populate"], "telemetry": { "collector": "perfview" } }
+],
+"comparisons": [
+  { "name": "opt-vs-base",        "workload": "populate", "baseline": "base",        "candidate": "opt" },
+  { "name": "opt-vs-base-traced", "workload": "populate", "baseline": "base-traced", "candidate": "opt-traced", "primaryMetric": "gcHeapAllocMB" }
+]
+```
+
+The traced variants inherit `perfview.exe` and `extract` from the run level and only flip the
+collector. Each row's delta stays within its own collection regime; the report's `regimes` column
+flags any arm whose repetitions mixed regimes. Elevation is required only if **some** variant's
+effective collector is `perfview`.
 
 ## `comparisons`
 

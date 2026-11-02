@@ -78,7 +78,7 @@ function Invoke-MeasuredCell($Manifest, $Comparison, [string]$Arm, [int]$Rep, $A
     $record.runId         = $Provenance.runId
     $record.variantCommit = $Provenance.commits[$Arm]
     $record.setupHash     = $Provenance.setupHash
-    $record.telemetryHash = $Provenance.telemetryHash
+    $record.telemetryHash = Get-TelemetryHash (Get-EffectiveTelemetry $Manifest $variant)
 
     $keepTrace = (Get-KeepTrace $Manifest) -and ($Rep -eq 1)
     Add-Result $ResultsDir $Comparison.name $Rep $PrimaryMetric $keepTrace $record
@@ -95,15 +95,13 @@ function Invoke-MeasuredCell($Manifest, $Comparison, [string]$Arm, [int]$Rep, $A
 
 function New-Provenance($Manifest, $Variants) {
     # Stamp every cell with what makes runs comparable: the commit each variant was built from (proves
-    # "same code" when pooling), and fingerprints of the setup (workloads/build) and telemetry
-    # (collection regime). The aggregator uses these to refuse incomparable pooling and to know when a
-    # metric spans collection regimes.
+    # "same code" when pooling) and a fingerprint of the setup (workloads/build). The telemetry regime
+    # is fingerprinted per cell (Invoke-MeasuredCell), because the collector can vary per variant.
     $commits = @{}
     foreach ($variant in $Variants) { $commits[$variant.label] = Get-VariantCommit $Manifest $variant }
     @{
         runId         = '{0}_{1:x}' -f (Get-Date -Format 'yyyyMMddTHHmmss'), (Get-Random)
         setupHash     = Get-TextHash (($Manifest.build | ConvertTo-Json -Depth 6 -Compress) + ($Manifest.workloads | ConvertTo-Json -Depth 6 -Compress))
-        telemetryHash = Get-TextHash ($Manifest.telemetry | ConvertTo-Json -Depth 8 -Compress)
         commits       = $commits
     }
 }
@@ -275,7 +273,8 @@ function Invoke-Harness {
     $selected = @($m.comparisons | Where-Object { -not $Only -or $_.name -in $Only })
     if ($selected.Count -eq 0) { throw 'no comparisons selected (check -Only against manifest names)' }
 
-    Assert-Elevation $m.telemetry.collector (-not $NoStabilize)
+    $collectors = @(Get-SelectedVariants $m $selected | ForEach-Object { (Get-EffectiveTelemetry $m $_).collector } | Sort-Object -Unique)
+    Assert-Elevation $collectors (-not $NoStabilize)
     Invoke-Setup $m
 
     $script:ActiveVariantLabel = $null

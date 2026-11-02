@@ -7,14 +7,14 @@ extracts frequency-invariant metrics from the trace. The result is a self-descri
 caller owns interleaving, warm-ups, retention, and journalling.
 #>
 
-function Get-VariantCommandLine($Manifest, $Variant, [string]$WorkloadName, [string]$Artifact) {
+function Get-VariantCommandLine($Manifest, $Variant, [string]$WorkloadName, [string]$Artifact, $Telemetry) {
     # The exact command a (variant, workload) pair runs: the workload's command template with run-time
     # placeholders filled, then the variant's optional args appended (see Get-VariantArgs). Centralized
     # so the measured rep and the warm-up always run the identical command line, and so per-variant
     # args let two variants share one branch and differ only by command line.
     $workload = $Manifest.workloads.$WorkloadName
     $vars = @{ repo = $Manifest.repo; artifact = $Artifact; label = $Variant.label; workload = $WorkloadName }
-    if ($Manifest.telemetry.PSObject.Properties.Name -contains 'extract') { $vars['process'] = $Manifest.telemetry.extract.process }
+    if ($Telemetry -and ($Telemetry.PSObject.Properties.Name -contains 'extract')) { $vars['process'] = $Telemetry.extract.process }
     if ($Manifest.PSObject.Properties.Name -contains 'workspace') { $vars['workspace'] = $Manifest.workspace.path }
     $commandLine = Expand-Template $workload.command $vars
     $extra = Get-VariantArgs $Variant
@@ -26,13 +26,14 @@ function Invoke-MeasuredRep($Manifest, $Variant, [string]$WorkloadName, [string]
     $workload = $Manifest.workloads.$WorkloadName
     Reset-Workspace $Manifest $workload
 
-    $commandLine   = Get-VariantCommandLine $Manifest $Variant $WorkloadName $Artifact
+    $telemetry     = Get-EffectiveTelemetry $Manifest $Variant
+    $commandLine   = Get-VariantCommandLine $Manifest $Variant $WorkloadName $Artifact $telemetry
     $commandTokens = Split-CommandLine $commandLine
 
     $freqFile = [IO.Path]::ChangeExtension($TracePath, '.freq.txt')
     $sampler  = Start-FrequencySampler $freqFile
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-    $collected = Invoke-Collector $Manifest $workload $commandLine $commandTokens $TracePath $LogPath
+    $collected = Invoke-Collector $Manifest $telemetry $workload $commandLine $commandTokens $TracePath $LogPath
     $stopwatch.Stop()
     $freqPct = Stop-FrequencySampler $sampler $freqFile
 
@@ -43,7 +44,7 @@ function Invoke-MeasuredRep($Manifest, $Variant, [string]$WorkloadName, [string]
     }
     $wallNorm = if ($freqPct -gt 0) { [math]::Round($wallSec * $freqPct / 100, 1) } else { $wallSec }
 
-    $metrics = Get-TraceMetrics $Manifest $collected.TracePath
+    $metrics = Get-TraceMetrics $telemetry $collected.TracePath
     $intrinsics = [ordered]@{ wallSec = $wallSec; freqPct = $freqPct; wallSecNorm = $wallNorm }
 
     [ordered]@{
@@ -64,7 +65,8 @@ function Invoke-Warmup($Manifest, $Variant, [string]$WorkloadName, [string]$Arti
     # A warm-up run primes the JIT and the filesystem cache; it is never collected or measured.
     $workload = $Manifest.workloads.$WorkloadName
     Reset-Workspace $Manifest $workload
-    $tokens = Split-CommandLine (Get-VariantCommandLine $Manifest $Variant $WorkloadName $Artifact)
+    $telemetry = Get-EffectiveTelemetry $Manifest $Variant
+    $tokens = Split-CommandLine (Get-VariantCommandLine $Manifest $Variant $WorkloadName $Artifact $telemetry)
     & $tokens[0] @($tokens[1..($tokens.Count - 1)]) *> $LogPath
 }
 
@@ -118,12 +120,12 @@ function Save-OracleIncident($Manifest, [string]$WorkloadName, [string]$Cell, [s
     Write-Log "oracle incident preserved -> $out (delta vs $ref)" 'WARN'
 }
 
-function Invoke-Collector($Manifest, $Workload, [string]$CommandLine, [string[]]$CommandTokens, [string]$TracePath, [string]$LogPath) {
+function Invoke-Collector($Manifest, $Telemetry, $Workload, [string]$CommandLine, [string[]]$CommandTokens, [string]$TracePath, [string]$LogPath) {
     $exe     = $CommandTokens[0]
     $cmdArgs = @($CommandTokens[1..($CommandTokens.Count - 1)])
-    switch ($Manifest.telemetry.collector) {
-        'perfview' { Invoke-PerfViewCollector $Manifest.telemetry $Manifest.run $Workload $exe $cmdArgs $TracePath $LogPath }
-        'command'  { Invoke-CommandCollector $Manifest.telemetry $CommandLine $TracePath $LogPath }
+    switch ($Telemetry.collector) {
+        'perfview' { Invoke-PerfViewCollector $Telemetry $Manifest.run $Workload $exe $cmdArgs $TracePath $LogPath }
+        'command'  { Invoke-CommandCollector $Telemetry $CommandLine $TracePath $LogPath }
         'time'     {
             if ((Test-HasOutputs $Manifest) -and (Get-DivergePollSec $Manifest) -gt 0) {
                 Invoke-TimeCollectorWatched $Manifest $exe $cmdArgs $LogPath
@@ -131,7 +133,7 @@ function Invoke-Collector($Manifest, $Workload, [string]$CommandLine, [string[]]
                 Invoke-TimeCollector $exe $cmdArgs $LogPath
             }
         }
-        default    { throw "unknown collector: $($Manifest.telemetry.collector)" }
+        default    { throw "unknown collector: $($Telemetry.collector)" }
     }
 }
 
@@ -231,13 +233,13 @@ function Test-Oracle($Manifest, $Workload) {
     if ((Invoke-Shell $command $null) -eq 0) { 'PASS' } else { 'FAIL' }
 }
 
-function Get-TraceMetrics($Manifest, [string]$TracePath) {
+function Get-TraceMetrics($Telemetry, [string]$TracePath) {
     if (-not $TracePath) { return [ordered]@{} }
-    if ($Manifest.telemetry.PSObject.Properties.Name -notcontains 'extract') { return [ordered]@{} }
+    if ($Telemetry.PSObject.Properties.Name -notcontains 'extract') { return [ordered]@{} }
 
     $outFile = [IO.Path]::ChangeExtension($TracePath, '.metrics.json')
-    $vars = @{ trace = $TracePath; out = $outFile; process = $Manifest.telemetry.extract.process }
-    $command = Expand-Template $Manifest.telemetry.extract.command $vars
+    $vars = @{ trace = $TracePath; out = $outFile; process = $Telemetry.extract.process }
+    $command = Expand-Template $Telemetry.extract.command $vars
     Invoke-Shell $command $null | Out-Null
     if (-not (Test-Path $outFile)) { return [ordered]@{} }
 

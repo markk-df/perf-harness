@@ -66,17 +66,17 @@ function Test-Administrator {
     $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Assert-Elevation([string]$Collector, [bool]$Stabilize) {
+function Assert-Elevation([string[]]$Collectors, [bool]$Stabilize) {
     $elevated = Test-Administrator
     if ($elevated) { Write-Log 'running elevated (Administrator)'; return }
 
     $reasons = @()
-    if ($Collector -eq 'perfview') { $reasons += "the 'perfview' collector needs ETW access" }
-    if ($Stabilize)                { $reasons += 'CPU stabilization changes power settings' }
+    if ($Collectors -contains 'perfview') { $reasons += "the 'perfview' collector needs ETW access" }
+    if ($Stabilize)                       { $reasons += 'CPU stabilization changes power settings' }
     if ($reasons.Count) {
         throw "administrator rights required: $($reasons -join '; '). Re-run in an elevated shell, or use -NoStabilize with the 'time'/'command' collector."
     }
-    Write-Log "not elevated; allowed because collector '$Collector' and no stabilization require it" 'WARN'
+    Write-Log "not elevated; allowed because no selected collector needs ETW and stabilization is off" 'WARN'
 }
 
 function Get-FrequencyPercent {

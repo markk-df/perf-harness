@@ -88,8 +88,9 @@ function Assert-Manifest($M, [bool]$RequireRepo = $true) {
         }
         $base = $M.variants | Where-Object { $_.label -eq $c.baseline }
         $cand = $M.variants | Where-Object { $_.label -eq $c.candidate }
-        if ($base -and $cand -and ($base.branch -eq $cand.branch) -and ((Get-VariantArgs $base) -eq (Get-VariantArgs $cand))) {
-            $problems.Add("comparison '$($c.name)': baseline '$($c.baseline)' and candidate '$($c.candidate)' are identical (same branch and args) -- nothing to compare")
+        if ($base -and $cand -and ($base.branch -eq $cand.branch) -and ((Get-VariantArgs $base) -eq (Get-VariantArgs $cand)) -and
+            ((Get-TelemetryHash (Get-EffectiveTelemetry $M $base)) -eq (Get-TelemetryHash (Get-EffectiveTelemetry $M $cand)))) {
+            $problems.Add("comparison '$($c.name)': baseline '$($c.baseline)' and candidate '$($c.candidate)' are identical (same branch, args, and telemetry) -- nothing to compare")
         }
     }
 
@@ -103,18 +104,31 @@ function Assert-Manifest($M, [bool]$RequireRepo = $true) {
         }
     }
 
-    $collector = if ($M.telemetry.PSObject.Properties.Name -contains 'collector') { $M.telemetry.collector } else { $null }
-    if ($collector -notin 'perfview','command','time') {
-        $problems.Add("telemetry.collector must be 'perfview', 'command', or 'time' (got '$collector')")
-    }
-    if ($collector -eq 'perfview' -and -not (Get-NestedValue $M.telemetry 'perfview' 'exe')) {
-        $problems.Add("collector 'perfview' requires telemetry.perfview.exe")
-    }
-    if ($collector -eq 'command' -and -not (Get-NestedValue $M.telemetry 'collect' 'command')) {
-        $problems.Add("collector 'command' requires telemetry.collect.command (a wrapper that runs {command} and writes {trace})")
+    Add-CollectorProblems $M.telemetry 'telemetry' $problems
+    foreach ($v in $M.variants) {
+        if (($v.PSObject.Properties.Name -contains 'telemetry') -and $v.telemetry) {
+            Add-CollectorProblems (Get-EffectiveTelemetry $M $v) "variant '$($v.label)' telemetry" $problems
+        }
     }
 
     if ($problems.Count) { throw "invalid manifest:`n - $($problems -join "`n - ")" }
+}
+
+function Add-CollectorProblems($Telemetry, [string]$Where, $Problems) {
+    # Validate a resolved telemetry config's collector and its collector-specific requirements. Used for
+    # the run-level telemetry and for each variant's effective (merged) telemetry, so a variant override
+    # is held to the same bar -- e.g. a variant that switches to 'perfview' must resolve a perfview.exe
+    # (its own or inherited from the run level).
+    $collector = if ($Telemetry -and ($Telemetry.PSObject.Properties.Name -contains 'collector')) { $Telemetry.collector } else { $null }
+    if ($collector -notin 'perfview','command','time') {
+        $Problems.Add("$Where.collector must be 'perfview', 'command', or 'time' (got '$collector')")
+    }
+    if ($collector -eq 'perfview' -and -not (Get-NestedValue $Telemetry 'perfview' 'exe')) {
+        $Problems.Add("$Where collector 'perfview' requires perfview.exe")
+    }
+    if ($collector -eq 'command' -and -not (Get-NestedValue $Telemetry 'collect' 'command')) {
+        $Problems.Add("$Where collector 'command' requires collect.command (a wrapper that runs {command} and writes {trace})")
+    }
 }
 
 function Get-NestedValue($Object, [string]$Parent, [string]$Child) {

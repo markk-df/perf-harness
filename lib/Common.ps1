@@ -112,3 +112,39 @@ function Get-TextHash([string]$Text) {
         -join ($bytes[0..7] | ForEach-Object { $_.ToString('x2') })
     } finally { $sha.Dispose() }
 }
+
+function Merge-TelemetryConfig($Base, $Override) {
+    # Deep-merge a per-variant telemetry override onto the run-level telemetry (override wins),
+    # mirroring the jq '. * $o' semantics used elsewhere: nested objects merge, scalars and arrays
+    # replace. Returns a new object, so the shared run-level config is never mutated.
+    if ($null -eq $Override) { return $Base }
+    if ($null -eq $Base)     { return $Override }
+    $merged = [ordered]@{}
+    foreach ($p in $Base.PSObject.Properties)     { $merged[$p.Name] = $p.Value }
+    foreach ($p in $Override.PSObject.Properties) {
+        if ($merged.Contains($p.Name) -and ($merged[$p.Name] -is [psobject]) -and
+            ($merged[$p.Name] -is [System.Management.Automation.PSCustomObject]) -and
+            ($p.Value -is [System.Management.Automation.PSCustomObject])) {
+            $merged[$p.Name] = Merge-TelemetryConfig $merged[$p.Name] $p.Value
+        } else {
+            $merged[$p.Name] = $p.Value
+        }
+    }
+    [pscustomobject]$merged
+}
+
+function Get-EffectiveTelemetry($Manifest, $Variant) {
+    # The telemetry config a given variant runs under: the run-level telemetry with an optional
+    # per-variant telemetry object deep-merged on top, so a variant can override just the collector
+    # and inherit everything else. With no override the run-level object is returned unchanged, so
+    # existing manifests -- and their telemetry fingerprint -- are byte-for-byte unaffected.
+    if ($Variant -and ($Variant.PSObject.Properties.Name -contains 'telemetry') -and $Variant.telemetry) {
+        Merge-TelemetryConfig $Manifest.telemetry $Variant.telemetry
+    } else {
+        $Manifest.telemetry
+    }
+}
+
+function Get-TelemetryHash($Telemetry) {
+    Get-TextHash ($Telemetry | ConvertTo-Json -Depth 8 -Compress)
+}
