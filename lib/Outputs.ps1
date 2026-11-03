@@ -17,10 +17,15 @@ A manifest opts in with a top-level `outputs` array:
     { "path": "C:/data/repos/aida-dayforce-mining-json", "goldRef": "97172dcd" },
     { "path": "C:/data/repos/aida-dayforce-mining-md",   "goldRef": "a3694f1f" }
   ],
-  "run": { "maxDivergentFiles": 1, "divergePollSec": 10 }
+  "run": { "maxDivergentFiles": 1, "watcherMaxDivergentFiles": 100, "divergePollSec": 10 }
 
-maxDivergentFiles is the per-repo abort threshold (default 1 => any single divergent file fails the
-sink); it is overridable per output. divergePollSec (default 10) is the during-run watcher cadence.
+maxDivergentFiles is the strict after-run ORACLE budget (default 1 => any single persistent divergent
+file fails the sink). watcherMaxDivergentFiles is the SEPARATE during-run watcher threshold (default
+100): an idempotent workload legitimately rewrites files in flight, so a few paths are transiently
+dirty mid-run even when the final tree is byte-clean against gold -- the watcher must ignore that
+churn and fire only on a genuine runaway (a bug diverging hundreds to thousands of files), while the
+after-run oracle still fails the rep on a SINGLE persistent divergent file. Both are overridable per
+output. divergePollSec (default 10) is the during-run watcher cadence.
 
 A workload may additionally carry `seedDepth` (default 0), which selects the oracle:
   seedDepth 0  -- IDEMPOTENCE (above): the sink is reset to goldRef and must stay byte-clean against
@@ -49,12 +54,27 @@ function Get-SeedDepth($Workload) {
 }
 
 function Get-OutputBudget($Manifest, $Output) {
-    # The per-repo abort threshold: the count of divergent files at which the sink is declared failed
-    # (and the during-run watcher kills the workload). Per-output override wins over the run default,
-    # which defaults to 1.
+    # The strict after-run ORACLE budget: the count of divergent files at which a sink's final tree is
+    # declared failed against gold. Default 1 => any single persistent divergent file fails the rep.
+    # This is NOT the during-run watcher threshold (see Get-OutputWatchBudget): the watcher tolerates
+    # an idempotent workload's in-flight write churn, but this final gate stays byte-strict. Per-output
+    # override wins over the run default.
     if ($Output.PSObject.Properties.Name -contains 'maxDivergentFiles') { return [int]$Output.maxDivergentFiles }
     if ($Manifest.run.PSObject.Properties.Name -contains 'maxDivergentFiles') { return [int]$Manifest.run.maxDivergentFiles }
     1
+}
+
+function Get-OutputWatchBudget($Manifest, $Output) {
+    # The during-run watcher's runaway-abort threshold: the count of in-flight divergent files at which
+    # the watcher kills the workload mid-run. Deliberately DECOUPLED from the strict oracle budget
+    # (Get-OutputBudget): an idempotent populate legitimately rewrites files in flight, so a handful of
+    # paths are transiently dirty mid-run even when the final tree is byte-clean against gold. The
+    # watcher must ignore that churn and fire only on a genuine runaway (a bug diverging hundreds to
+    # thousands of files); correctness is still enforced by the after-run oracle at budget 1. Per-output
+    # override wins over the run default, which defaults to 100.
+    if ($Output.PSObject.Properties.Name -contains 'watcherMaxDivergentFiles') { return [int]$Output.watcherMaxDivergentFiles }
+    if ($Manifest.run.PSObject.Properties.Name -contains 'watcherMaxDivergentFiles') { return [int]$Manifest.run.watcherMaxDivergentFiles }
+    100
 }
 
 function Get-DivergePollSec($Manifest) {
@@ -85,9 +105,11 @@ function Test-OutputOverBudget([string]$Path, [int]$Budget) {
 }
 
 function Get-OutputsBreach($Manifest) {
-    # First sink that has crossed its abort threshold, or $null. Used by the during-run watcher.
+    # First sink whose in-flight divergence has crossed the runaway watcher threshold, or $null. Used
+    # only by the during-run watcher, so it reads Get-OutputWatchBudget (runaway-scale), NOT the strict
+    # oracle budget -- an idempotent workload's transient write churn therefore never trips it.
     foreach ($o in $Manifest.outputs) {
-        $budget = Get-OutputBudget $Manifest $o
+        $budget = Get-OutputWatchBudget $Manifest $o
         if (Test-OutputOverBudget $o.path $budget) { return @{ path = $o.path; budget = $budget } }
     }
     $null
@@ -144,10 +166,12 @@ function Save-OutputsIncident($Manifest, [string]$Cell, [string]$ResultsDir) {
 
         $take = [Math]::Min($total, $maxFiles)
         $budget = Get-OutputBudget $Manifest $o
+        $watchBudget = Get-OutputWatchBudget $Manifest $o
         @(
             "sink:                 $($o.path)"
             "goldRef:              $($o.goldRef)"
-            "abort threshold:      $budget"
+            "oracle budget:        $budget"
+            "watcher budget:       $watchBudget"
             "divergent files:      $total   (true total)"
             "captured below:       $take"
         ) | Set-Content -LiteralPath (Join-Path $out 'summary.txt')

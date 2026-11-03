@@ -19,6 +19,7 @@
     "reps": 3,
     "cooldownSec": 0,
     "maxDivergentFiles": 1,
+    "watcherMaxDivergentFiles": 100,
     "divergePollSec": 10,
     "incidentMaxFiles": 20
   },
