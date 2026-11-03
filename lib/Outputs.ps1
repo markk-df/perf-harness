@@ -82,6 +82,21 @@ function Get-DivergePollSec($Manifest) {
     10
 }
 
+function Get-OracleConfirmTries($Manifest) {
+    # How many times the oracle re-measures a screen-flagged breach before recording it. The fast budget
+    # screen can catch a just-written file mid-settle right after the workload exits; a persistent real
+    # divergence survives every retry, a tail-of-IO transient clears within one. Default 3.
+    if ($Manifest.run.PSObject.Properties.Name -contains 'oracleConfirmTries') { return [int]$Manifest.run.oracleConfirmTries }
+    3
+}
+
+function Get-OracleConfirmSettleMs($Manifest) {
+    # Pause before each oracle confirm re-measure, giving a just-flushed file time to settle to its final
+    # bytes. Default 750ms.
+    if ($Manifest.run.PSObject.Properties.Name -contains 'oracleConfirmSettleMs') { return [int]$Manifest.run.oracleConfirmSettleMs }
+    750
+}
+
 function Reset-Outputs($Manifest, $Workload) {
     # Restore every sink to its seed before a rep. For idempotence (seedDepth 0) the seed IS goldRef;
     # for drift (seedDepth K) it is goldRef~K. Hard-reset to the seed then remove untracked and ignored
@@ -104,6 +119,14 @@ function Test-OutputOverBudget([string]$Path, [int]$Budget) {
     $hit.Count -ge $Budget
 }
 
+function Measure-OutputDivergence([string]$Path) {
+    # Authoritative divergent-file count: a FULL `git status` (no broken-pipe truncation), so git
+    # finishes its working-tree scan and every path is read at its current bytes. Used only to CONFIRM a
+    # breach the fast screen already flagged -- never as the first screen, since on a clean tree it still
+    # walks all files.
+    @(& git -C $Path status --porcelain --untracked-files=all 2>$null).Count
+}
+
 function Get-OutputsBreach($Manifest) {
     # First sink whose in-flight divergence has crossed the runaway watcher threshold, or $null. Used
     # only by the during-run watcher, so it reads Get-OutputWatchBudget (runaway-scale), NOT the strict
@@ -123,12 +146,25 @@ function Test-OutputsOracle($Manifest, $Workload) {
     # divergence from GOLD instead of from the seed. For idempotence (seedDepth 0) HEAD already IS
     # goldRef, so the mixed reset is skipped and the check is unchanged. Records the breaching sinks so
     # the incident capture knows which repos to snapshot without recomputing.
-    $depth = Get-SeedDepth $Workload
+    #
+    # Confirm-on-recheck: the fast screen can flag a file that is still settling to its final bytes in
+    # the moment right after the workload process exits (a tail-of-IO transient that self-heals). So a
+    # screen breach is only RECORDED after it survives an authoritative full re-measure repeated over a
+    # short settle window; a persistent real divergence survives every retry, a transient clears.
+    $depth   = Get-SeedDepth $Workload
+    $tries   = Get-OracleConfirmTries $Manifest
+    $settle  = Get-OracleConfirmSettleMs $Manifest
     $script:OutputsLastBreaches = @()
     foreach ($o in $Manifest.outputs) {
         if ($depth -gt 0) { Invoke-Shell "git -C `"$($o.path)`" reset -q --mixed $($o.goldRef)" $null | Out-Null }
         $budget = Get-OutputBudget $Manifest $o
-        if (Test-OutputOverBudget $o.path $budget) { $script:OutputsLastBreaches += $o }
+        if (-not (Test-OutputOverBudget $o.path $budget)) { continue }
+        $persistent = $true
+        for ($a = 0; $a -lt $tries; $a++) {
+            Start-Sleep -Milliseconds $settle
+            if ((Measure-OutputDivergence $o.path) -lt $budget) { $persistent = $false; break }
+        }
+        if ($persistent) { $script:OutputsLastBreaches += $o }
     }
     if ($script:OutputsLastBreaches.Count -gt 0) { 'FAIL' } else { 'PASS' }
 }function Get-IncidentMaxFiles($Manifest) {
